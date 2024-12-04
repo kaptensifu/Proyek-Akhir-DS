@@ -1,0 +1,175 @@
+---
+title: "tes"
+author: "Muhammad Meidy Noor Al Barry_123220079"
+date: "2024-11-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(cluster)
+library(forecast)
+library(ggplot2)
+```
+
+```{r}
+# Membaca data dari file CSV
+data_2019 <- read.csv("data_2019.csv")
+data_2020 <- read.csv("data_2020.csv")
+data_2021 <- read.csv("data_2021.csv")
+data_2022 <- read.csv("data_2022.csv")
+data_2023 <- read.csv("data_2023.csv")
+
+data_2019 <- data_2019 %>%
+  rename_with(~ paste0(., "_2019"), -Provinsi)
+data_2020 <- data_2020 %>%
+  rename_with(~ paste0(., "_2020"), -Provinsi)
+data_2021 <- data_2021 %>%
+  rename_with(~ paste0(., "_2021"), -Provinsi)
+data_2022 <- data_2022 %>%
+  rename_with(~ paste0(., "_2022"), -Provinsi)
+data_2023 <- data_2023 %>%
+  rename_with(~ paste0(., "_2023"), -Provinsi)
+
+data_all <- data_2019 %>%
+  full_join(data_2020, by = "Provinsi") %>%
+  full_join(data_2021, by = "Provinsi") %>%
+  full_join(data_2022, by = "Provinsi") %>%
+  full_join(data_2023, by = "Provinsi")
+
+data_all <- data_all %>%
+  filter(!Provinsi %in% c("Indonesia"))
+
+data_provinsi <- data_all %>%
+  select(Provinsi)
+
+data_all <- data_all %>% 
+  mutate(across(everything(), ~ ifelse(. == "" | . == "...", 0, .))) %>% 
+  mutate(across(everything(), ~ replace_na(., 0)))
+
+data_all <- data_all %>%
+  mutate(across(-Provinsi, ~ as.numeric(.)))
+```
+
+```{r}
+# Faktor perceraian
+factors <- c("Judi", "Zina", "Mabuk", "Madat", "Ekonomi", "Poligami", "Kekerasan.Dalam.Rumah.Tangga", 
+             "Meninggalkan.Salah.satu.Pihak", "Dihukum.Penjara", "Cacat.Badan", 
+             "Perselisihan.dan.Pertengkaran.Terus.Menerus", "Kawin.Paksa", "Murtad")
+
+# Pisahkan data menjadi tabel per faktor
+factor_tables <- lapply(factors, function(factor) {
+  data_all %>% select(Provinsi, starts_with(factor))
+})
+names(factor_tables) <- paste0("tabel_", tolower(factors))
+
+normalize_data <- function(data) {
+  data %>%
+    mutate(across(-Provinsi, scale))  # Normalisasi dengan Z-score
+}
+
+# Terapkan normalisasi pada setiap tabel faktor
+normalized_tables <- lapply(factor_tables, normalize_data)
+
+# Fungsi untuk  clustering
+cluster <- function(data, k = 3) {
+  # Hitung jarak menggunakan dist
+  dist_matrix <- dist(data[,-1])
+  
+  # Lakukan hierarchical clustering
+  hc <- hclust(dist_matrix)
+  
+  # Tentukan klaster
+  clusters <- cutree(hc, k = k)
+  
+  # Urutkan klaster berdasarkan nilai rata-rata centroid jaraknya
+  cluster_centroids <- sapply(unique(clusters), function(c) mean(dist_matrix[clusters == c]))
+  ordered_clusters <- order(cluster_centroids)
+  
+  # Mapping klaster untuk nilai 1, 2, 3 berdasarkan jarak
+  cluster_map <- setNames(1:k, ordered_clusters)
+  
+  # Update klaster dalam data
+  data <- data %>% mutate(Cluster = factor(cluster_map[clusters]))
+  
+  return(data)
+}
+
+# Terapkan fungsi clustering
+clustered_tables <- lapply(normalized_tables, cluster)
+
+# Fungsi untuk menghitung Silhouette Score
+calculate_silhouette_score <- function(data, k = 3) {
+  cl <- kmeans(data[,-1], centers = k)
+  silhouette_score <- silhouette(cl$cluster, dist(data[,-1]))
+  mean(silhouette_score[, 3])  # Nilai rata-rata silhouette score
+}
+
+# Evaluasi silhouette untuk data setiap faktor
+silhouette_scores <- lapply(normalized_tables, function(table) {
+  calculate_silhouette_score(table)
+})
+print(silhouette_scores)
+
+
+# Gabungkan hasil clustering ke tabel utama
+tabel_hasil <- data_provinsi
+for (i in 1:length(clustered_tables)) {
+  tabel_hasil <- tabel_hasil %>%
+    left_join(clustered_tables[[i]] %>% select(Provinsi, Cluster), 
+              by = "Provinsi", 
+              suffix = c("", paste0("_", names(clustered_tables)[i])))
+}
+
+# Cetak tabel hasil
+print(tabel_hasil)
+
+```
+
+# Pembuatan Plot per faktor untuk semua provinsi
+```{r}
+plot_cluster <- function(data, title) {
+  ggplot(data, aes(x = reorder(Provinsi, Cluster), y = Cluster, fill = Cluster)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = title) +
+    theme_minimal() +
+    scale_fill_manual(values = c("1" = "blue", "2" = "orange", "3" = "red"))
+}
+
+# Plot clustering antar provinsi untuk setiap faktor
+plots <- lapply(names(clustered_tables), function(name) {
+  plot_cluster(clustered_tables[[name]], title = paste("Cluster for", name))
+})
+
+# Menampilkan semua plot
+print(plots)
+
+```
+
+```{r}
+# Fungsi untuk membuat scatter plot
+scatter_plot <- function(data, x_var, y_var, title) {
+  ggplot(data, aes_string(x = x_var, y = y_var, color = "Cluster")) +
+    geom_point(size = 3, alpha = 0.7) +
+    theme_minimal() +
+    labs(title = title, x = x_var, y = y_var) +
+    scale_color_manual(values = c("blue", "orange", "red"))
+}
+
+# Scatter plot untuk semua faktor
+scatter_plots <- lapply(names(clustered_tables), function(factor_name) {
+  data <- clustered_tables[[factor_name]]
+  x_var <- names(data)[2]
+  y_var <- names(data)[3]
+  scatter_plot(data, x_var, y_var, title = paste("Scatter Plot for", factor_name))
+})
+
+# Menampilkan plot
+print(scatter_plots)
+```
+
